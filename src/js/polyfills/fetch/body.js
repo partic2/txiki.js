@@ -3,7 +3,7 @@ function isDataView(obj) {
 }
 
 function consumed(body) {
-    if (body._noBody) {
+    if (body._bodySize===0) {
         return;
     }
 
@@ -26,36 +26,6 @@ function fileReaderReady(reader) {
     });
 }
 
-function readBlobAsArrayBuffer(blob) {
-    var reader = new FileReader();
-    var promise = fileReaderReady(reader);
-
-    reader.readAsArrayBuffer(blob);
-
-    return promise;
-}
-
-function readBlobAsText(blob) {
-    var reader = new FileReader();
-    var promise = fileReaderReady(reader);
-    var match = /charset=([A-Za-z0-9_-]+)/.exec(blob.type);
-    var encoding = match ? match[1] : 'utf-8';
-
-    reader.readAsText(blob, encoding);
-
-    return promise;
-}
-
-function readArrayBufferAsText(buf) {
-    var view = new Uint8Array(buf);
-    var chars = new Array(view.length);
-
-    for (var i = 0; i < view.length; i++) {
-        chars[i] = String.fromCharCode(view[i]);
-    }
-
-    return chars.join('');
-}
 
 function bufferClone(buf) {
     if (buf.slice) {
@@ -80,24 +50,43 @@ export const BodyMixin = {
         this._bodyInit = body;
 
         if (!body) {
-            this._noBody = true;
-            this._bodyText = '';
+            this._bodySize = 0;
+            this._bodyReadable = ReadableStream.from([new Uint8Array(0)]);
         } else if (typeof body === 'string') {
-            this._bodyText = body;
+            const bodyBuffer=new TextEncoder().encode(body);
+            this._bodySize=bodyBuffer.byteLength;
+            this._bodyReadable = ReadableStream.from([bodyBuffer]);
         } else if (isPrototypeOf(Blob.prototype, body)) {
-            this._bodyBlob = body;
+            this._bodySize=body.size;
+            this._bodyReadable = body.stream;
         } else if (isPrototypeOf(FormData.prototype, body)) {
-            this._bodyFormData = body;
+            //formdata polyfill
+            const bodyBuffer = body['_blob']();
+            this._bodySize=bodyBuffer.byteLength;
+            this._bodyReadable = ReadableStream.from([bodyBuffer]);
         } else if (isPrototypeOf(URLSearchParams.prototype, body)) {
-            this._bodyText = body.toString();
+            const bodyBuffer=new TextEncoder().encode(body);
+            this._bodySize=bodyBuffer.byteLength;
+            this._bodyReadable = ReadableStream.from([new TextEncoder().encode(body.toString())]);
         } else if (isDataView(body)) {
-            this._bodyArrayBuffer = bufferClone(body.buffer);
+            const bodyBuffer=new Uint8Array(bufferClone(body.buffer));
+            this._bodySize=bodyBuffer.byteLength;
+            this._bodyReadable = ReadableStream.from([bodyBuffer]);
         } else if (isPrototypeOf(ArrayBuffer.prototype, body) || ArrayBuffer.isView(body)) {
-            this._bodyArrayBuffer = bufferClone(body);
+            const bodyBuffer=new Uint8Array(bufferClone(body.buffer));
+            this._bodySize=bodyBuffer.byteLength;
+            this._bodyReadable = ReadableStream.from([bodyBuffer]);
+        } else if (isPrototypeOf(ReadableStream.prototype, body)){
+            this._bodySize=-1;
+            this._bodyReadable = body;
         } else {
-            this._bodyText = body = Object.prototype.toString.call(body);
+            const bodyBuffer=new TextEncoder().encode(body.toString());
+            this._bodySize=bodyBuffer.byteLength;
+            this._bodyReadable = ReadableStream.from([bodyBuffer]);
         }
 
+        this.body=this._bodyReadable
+        
         if (!this.headers.get('content-type')) {
             if (typeof body === 'string') {
                 this.headers.set('content-type', 'text/plain;charset=UTF-8');
@@ -109,70 +98,46 @@ export const BodyMixin = {
         }
     },
 
-    blob() {
+    async blob() {
         const rejected = consumed(this);
 
         if (rejected) {
-            return rejected;
+            await rejected;
         }
 
-        if (this._bodyBlob) {
-            return Promise.resolve(this._bodyBlob);
-        } else if (this._bodyArrayBuffer) {
-            return Promise.resolve(new Blob([ this._bodyArrayBuffer ]));
-        } else if (this._bodyFormData) {
-            throw new Error('could not read FormData body as blob');
-        } else {
-            return Promise.resolve(new Blob([ this._bodyText ]));
-        }
-    },
-
-    arrayBuffer() {
-        if (this._bodyArrayBuffer) {
-            var isConsumed = consumed(this);
-
-            if (isConsumed) {
-                return isConsumed;
-            } else if (ArrayBuffer.isView(this._bodyArrayBuffer)) {
-                return Promise.resolve(
-                    this._bodyArrayBuffer.buffer.slice(
-                        this._bodyArrayBuffer.byteOffset,
-                        this._bodyArrayBuffer.byteOffset + this._bodyArrayBuffer.byteLength
-                    )
-                );
-            } else {
-                return Promise.resolve(this._bodyArrayBuffer);
+        if (this._bodyReadable) {
+            const parts=[];
+            const reader=this._bodyReadable.getReader();
+            while(true){
+                const next=await reader.read();
+                if(next.done){
+                    break;
+                }
+                parts.push(next.value);
             }
+            return new Blob(parts);
         } else {
-            return this.blob().then(readBlobAsArrayBuffer);
+            throw new Error('Unknown body type');
         }
     },
 
-    text() {
-        const rejected = consumed(this);
-
-        if (rejected) {
-            return rejected;
-        }
-
-        if (this._bodyBlob) {
-            return readBlobAsText(this._bodyBlob);
-        } else if (this._bodyArrayBuffer) {
-            return Promise.resolve(readArrayBufferAsText(this._bodyArrayBuffer));
-        } else if (this._bodyFormData) {
-            throw new Error('could not read FormData body as text');
-        } else {
-            return Promise.resolve(this._bodyText);
-        }
+    async arrayBuffer() {
+        //TODO: expose Blob.parts to reduce memeory copy?
+        return await (await this.blob()).arrayBuffer();
     },
 
-    formData() {
-        return this.text().then(decode);
+    async text() {
+        return new TextDecoder().decode(await this.arrayBuffer());
     },
 
-    json() {
-        return this.text().then(JSON.parse);
+    async formData() {
+        return decode(await this.text());
     },
+
+    async json() {
+        return JSON.parse(await this.text());
+    },
+
 };
 
 function decode(body) {

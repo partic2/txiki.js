@@ -16,6 +16,8 @@ class XMLHttpRequest extends EventTarget {
     LOADING = XHR.LOADING;
     DONE = XHR.DONE;
 
+    __ontjsstreamsenddata=null;
+
     constructor() {
         super();
 
@@ -52,6 +54,12 @@ class XMLHttpRequest extends EventTarget {
         xhr.ontimeout = () => {
             this.dispatchEvent(new Event('timeout'));
         };
+
+        xhr.ontjsstreamsenddata = () => {
+            if(this.__ontjsstreamsenddata!=null){
+                this.__ontjsstreamsenddata();
+            }
+        }
 
         this[kXHR] = xhr;
     }
@@ -175,6 +183,14 @@ class XMLHttpRequest extends EventTarget {
     setRequestHeader(name, value) {
         return this[kXHR].setRequestHeader(name, value);
     }
+
+    __tjsGetAndClearResponseBuffer() {
+        return this[kXHR].__tjsGetAndClearResponseBuffer();
+    }
+
+    __tjsStreamSend(buffer){
+        return this[kXHR].__tjsStreamSend(buffer);
+    }
 }
 
 const xhrProto = XMLHttpRequest.prototype;
@@ -187,6 +203,7 @@ defineEventAttribute(xhrProto, 'loadstart');
 defineEventAttribute(xhrProto, 'progress');
 defineEventAttribute(xhrProto, 'readystatechange');
 defineEventAttribute(xhrProto, 'timeout');
+defineEventAttribute(xhrProto, 'tjsstreamsenddata');
 
 Object.defineProperty(window, 'XMLHttpRequest', {
     enumerable: true,

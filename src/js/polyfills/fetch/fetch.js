@@ -16,19 +16,23 @@ export function fetch(input, init) {
             xhr.abort();
         }
 
-        xhr.onload = function() {
-            const options = {
-                statusText: xhr.statusText,
-                headers: parseHeaders(xhr.getAllResponseHeaders() || ''),
-                status: xhr.status,
-                url: xhr.responseURL
-            };
-            const body = xhr.response;
+        //tjs only
+        let controller=null;
+        const responseReader=new ReadableStream({
+            start(controller_){controller=controller_;}
+        });
 
-            setTimeout(function() {
-                resolve(new Response(body, options));
-            }, 0);
-        };
+        xhr.onprogress=function(){
+            if(controller!=null){
+                controller.enqueue(new Uint8Array(xhr.__tjsGetAndClearResponseBuffer()));
+            }
+        }
+        xhr.onload=function(){
+            if(controller!=null){
+                controller.enqueue(new Uint8Array(xhr.__tjsGetAndClearResponseBuffer()));
+                controller.close();
+            }
+        }
 
         xhr.onerror = function() {
             setTimeout(function() {
@@ -77,19 +81,43 @@ export function fetch(input, init) {
             });
         }
 
-        if (request.signal) {
-            request.signal.addEventListener('abort', abortXhr);
-
-            xhr.onreadystatechange = function() {
-                // DONE (success or failure)
-                if (xhr.readyState === xhr.DONE) {
-                    request.signal.removeEventListener('abort', abortXhr);
-                }
+        xhr.onreadystatechange = function() {
+            // DONE (success or failure)
+            if (request.signal && xhr.readyState === xhr.DONE) {
+                request.signal.removeEventListener('abort', abortXhr);
+            }
+            if(xhr.readyState === xhr.HEADERS_RECEIVED){
+                const options = {
+                    statusText: xhr.statusText,
+                    headers: parseHeaders(xhr.getAllResponseHeaders() || ''),
+                    status: xhr.status,
+                    url: xhr.responseURL
+                };
+                setTimeout(function() {
+                    resolve(new Response(responseReader, options));
+                }, 0);
+            }
+        };
+        if(request._bodySize>0){
+            request.arrayBuffer().then((body)=>{
+                xhr.send(new Uint8Array(body));
+            })
+        }else if(request._bodySize===-1){
+            const reader=request.body.getReader();
+            xhr.__ontjsstreamsenddata=function(){
+                reader.read().then((next)=>{
+                    if(next.done){
+                        xhr.__tjsStreamSend(null);
+                    }else{
+                        xhr.__tjsStreamSend(next.value);
+                    }
+                });
             };
+            xhr.__tjsStreamSend();
+        }else{
+            xhr.send(null);
         }
-
-        // TODO: why not use the .body property?
-        xhr.send(typeof request._bodyInit === 'undefined' ? null : request._bodyInit);
+        
     });
 }
 
